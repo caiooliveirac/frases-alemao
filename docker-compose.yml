@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-klinikdeutsch_db}
+      POSTGRES_USER: ${POSTGRES_USER:-usuario}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-senha}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-usuario} -d ${POSTGRES_DB:-klinikdeutsch_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-usuario}:${POSTGRES_PASSWORD:-senha}@db:5432/${POSTGRES_DB:-klinikdeutsch_db}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
+      DJANGO_SECURE_SSL: ${DJANGO_SECURE_SSL:-False}
+    ports:
+      - "8050:8000"
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120
+
+volumes:
+  pgdata:

@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+body {
+  @apply bg-[#121212] text-gray-100 font-sans;
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
