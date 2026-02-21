@@ -13,6 +13,12 @@ import {
 import DailyReview from "./components/DailyReview";
 import InteractiveReader from "./components/InteractiveReader";
 
+const FALLBACK_SCENARIOS = [
+  "Aufgrund des progredienten Lungenversagens müssen wir den Patienten umgehend stabilisieren.",
+  "Trotz maximaler konservativer Therapie bleibt der mittlere arterielle Druck kritisch niedrig.",
+  "Angesichts der massiven intrakraniellen Blutung ist eine sofortige neurochirurgische Entlastung unabdingbar.",
+];
+
 const ANALYSIS_STATE = {
   IDLE: "idle",
   ANALYZING_LITE: "analyzing_lite",
@@ -112,7 +118,7 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [scenarioItems, setScenarioItems] = useState([]);
   const [selectedLevel, setSelectedLevel] = useState("C1");
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => getRandomScenario(FALLBACK_SCENARIOS));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
@@ -155,10 +161,12 @@ export default function App() {
       try {
         const current = await getCurrentUser();
         setUser(current);
-        await Promise.all([loadScenarios(current?.proficiency_level || ""), loadDueCards()]);
+        setAuthLoading(false);
+        Promise.all([loadScenarios(current?.proficiency_level || ""), loadDueCards()]).catch(() => {
+          // mantém UI responsiva mesmo se algum carregamento inicial falhar
+        });
       } catch {
         setUser(null);
-      } finally {
         setAuthLoading(false);
       }
     };
@@ -175,7 +183,10 @@ export default function App() {
     try {
       const logged = await loginUser(username.trim(), password);
       setUser(logged);
-      await Promise.all([loadScenarios(logged?.proficiency_level || ""), loadDueCards()]);
+      setAuthLoading(false);
+      Promise.all([loadScenarios(logged?.proficiency_level || ""), loadDueCards()]).catch(() => {
+        // mantém login rápido; erros de carregamento aparecem nos fluxos específicos
+      });
       setPassword("");
     } catch (err) {
       setAuthError(err?.message || "Falha no login.");
