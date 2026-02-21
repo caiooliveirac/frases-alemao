@@ -12,7 +12,7 @@ import spacy
 from django.core.cache import cache
 from django.db.models import Prefetch
 from django.utils import timezone
-from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
 from .models import TextDocument, TextTokenRelation, UserKnowledge
 
@@ -300,14 +300,28 @@ class LearningEngineService:
     @staticmethod
     def _create_completion(messages: List[Dict[str, str]], temperature: float, max_tokens: int):
         client = LearningEngineService._get_llm_client()
-        return client.chat.completions.create(
-            model="grok-4-1-fast-reasoning",
-            response_format={"type": "json_object"},
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=["\n\n"],
-        )
+        try:
+            return client.chat.completions.create(
+                model="grok-4-1-fast-reasoning",
+                response_format={"type": "json_object"},
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop=["\n\n"],
+            )
+        except BadRequestError as exc:
+            error_text = str(exc)
+            if "does not support parameter stop" not in error_text:
+                raise
+
+            logger.warning("Modelo não suporta 'stop'; reenviando chamada sem stop.")
+            return client.chat.completions.create(
+                model="grok-4-1-fast-reasoning",
+                response_format={"type": "json_object"},
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
     @staticmethod
     def _validate_wordcard_schema(parsed: Dict[str, Any]) -> Dict[str, Any]:
