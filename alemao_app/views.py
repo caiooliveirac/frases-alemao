@@ -1,3 +1,5 @@
+import logging
+import time
 from django.contrib.auth import authenticate, login, logout
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -7,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from datetime import timedelta
 
-from .learning_engine_service import LearningEngineError, evaluate_translation, generate_study_plan
+from .learning_engine_service import LearningEngineError, LearningEngineService, evaluate_translation, generate_study_plan
 from .models import (
     CEFRLevel,
     ClinicalScenario,
@@ -19,8 +21,99 @@ from .models import (
     UserProfile,
     WordClickEvent,
 )
-from .serializers import TextDocumentSerializer, TextTokenRelationSerializer
+from .serializers import (
+    AnalyzeLiteResponseSerializer,
+    AnalyzeRequestSerializer,
+    PhraseAnalysisResponseSerializer,
+    TextDocumentSerializer,
+    TextTokenRelationSerializer,
+)
 from .text_processing_service import TextDissector, TextDissectorError
+
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_case(case_value: str) -> str:
+    case_map = {
+        "NOM": "Nom",
+        "AKK": "Akk",
+        "DAT": "Dat",
+    }
+    return case_map.get((case_value or "").upper(), "?")
+
+
+def _infer_syntactic_role(pos_tag: str, grammatical_case: str) -> tuple[str, float]:
+    normalized_pos = (pos_tag or "").upper()
+    normalized_case = (grammatical_case or "").upper()
+
+    if normalized_case == "NOM" and normalized_pos in {"NOUN", "PROPN", "PRON"}:
+        return "subject", 0.85
+    if normalized_case in {"AKK", "DAT", "GEN"} and normalized_pos in {"NOUN", "PROPN", "PRON"}:
+        return "object", 0.8
+    if normalized_pos in {"ADJ", "ADV", "DET"}:
+        return "modifier", 0.65
+    return "?", 0.35
+
+
+def _fetch_document(document_id: int):
+    try:
+        return TextDocument.objects.only("id", "raw_text").get(id=document_id)
+    except TextDocument.DoesNotExist:
+        return None
+
+
+def _fetch_relations(document_id: int, limit: int):
+    return list(
+        TextTokenRelation.objects.select_related("word_token")
+        .filter(text_document_id=document_id)
+        .order_by("position")[:limit]
+    )
+
+
+def _token_gender_or_none(raw_gender: str):
+    return raw_gender if raw_gender in {"M", "F", "N"} else None
+
+
+def _build_lite_tokens(relations):
+    tokens = []
+    for relation in relations:
+        word = relation.word_token
+        tokens.append(
+            {
+                "token_id": relation.id,
+                "lemma": word.lemma,
+                "pos": word.pos_tag,
+                "gender": _token_gender_or_none(word.gender),
+            }
+        )
+    return tokens
+
+
+def _build_deep_tokens(document, relations):
+    context_by_position = LearningEngineService._extract_sentence_contexts(document.raw_text)
+
+    tokens = []
+    for relation in relations:
+        word = relation.word_token
+        syntactic_role, confidence = _infer_syntactic_role(word.pos_tag, relation.grammatical_case)
+        context = context_by_position.get(relation.position, {})
+        surface = context.get("surface") or word.lemma
+
+        tokens.append(
+            {
+                "token_id": relation.id,
+                "surface": str(surface),
+                "lemma": word.lemma,
+                "pos": word.pos_tag,
+                "gender": _token_gender_or_none(word.gender),
+                "case": _normalize_case(relation.grammatical_case),
+                "syntactic_role": syntactic_role,
+                "confidence": confidence,
+            }
+        )
+
+    return tokens
 
 
 def get_or_create_user_profile(user):
@@ -178,10 +271,95 @@ class DocumentDetailAPIView(APIView):
         )
 
 
+class AnalyzeLiteAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        start = time.perf_counter()
+        req = AnalyzeRequestSerializer(data=request.data)
+        req.is_valid(raise_exception=True)
+
+        document_id = req.validated_data["document_id"]
+        limit = req.validated_data.get("limit", 20)
+        document = _fetch_document(document_id)
+        if not document:
+            return Response({"detail": "Documento não encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        relations = _fetch_relations(document_id, limit)
+        payload = {
+            "document_id": document.id,
+            "tokens": _build_lite_tokens(relations),
+        }
+
+        serializer = AnalyzeLiteResponseSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "analyze_lite_timing document_id=%s token_count=%s duration_ms=%.2f",
+            document_id,
+            len(payload.get("tokens", [])),
+            elapsed_ms,
+        )
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+class AnalyzeDeepAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        start = time.perf_counter()
+        req = AnalyzeRequestSerializer(data=request.data)
+        req.is_valid(raise_exception=True)
+
+        document_id = req.validated_data["document_id"]
+        limit = req.validated_data.get("limit", 20)
+        document = _fetch_document(document_id)
+        if not document:
+            return Response({"detail": "Documento não encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        relations = _fetch_relations(document_id, limit)
+        payload = {
+            "document_id": document.id,
+            "tokens": _build_deep_tokens(document, relations),
+        }
+
+        serializer = PhraseAnalysisResponseSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "analyze_deep_timing document_id=%s token_count=%s duration_ms=%.2f",
+            document_id,
+            len(payload.get("tokens", [])),
+            elapsed_ms,
+        )
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+class PhraseAnalysisStrictAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, document_id: int):
+        document = _fetch_document(document_id)
+        if not document:
+            return Response({"detail": "Documento não encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        relations = _fetch_relations(document_id, limit=20)
+
+        response_payload = {
+            "document_id": document.id,
+            "tokens": _build_deep_tokens(document, relations),
+        }
+
+        serializer = PhraseAnalysisResponseSerializer(data=response_payload)
+        serializer.is_valid(raise_exception=True)
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
 class StudyGenerateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        start = time.perf_counter()
         document_id = request.data.get("document_id")
         word_id = request.data.get("word_id")
 
@@ -211,9 +389,14 @@ class StudyGenerateAPIView(APIView):
 
         try:
             user = request.user
-            get_or_create_user_profile(user)
+            profile = get_or_create_user_profile(user)
 
-            study_payload = generate_study_plan(user, document_id, focus_word_id=parsed_word_id)
+            study_payload = generate_study_plan(
+                user,
+                document_id,
+                focus_word_id=parsed_word_id,
+                proficiency_level=profile.proficiency_level,
+            )
 
             for item in study_payload.get("items", []):
                 word_token_id = item.get("word_token_id")
@@ -241,6 +424,15 @@ class StudyGenerateAPIView(APIView):
                 ]
                 study_payload["study_items_count"] = len(study_payload["items"])
 
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "wordcard_timing document_id=%s word_id=%s item_count=%s duration_ms=%.2f",
+                document_id,
+                parsed_word_id,
+                study_payload.get("study_items_count", 0),
+                elapsed_ms,
+            )
+
             return Response(study_payload, status=status.HTTP_200_OK)
         except LearningEngineError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -255,6 +447,7 @@ class StudyEvaluateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        start = time.perf_counter()
         desafio_pt = (request.data.get("desafio_pt") or "").strip()
         tentativa_de = (request.data.get("tentativa_de") or "").strip()
         contexto_original = (request.data.get("contexto_original") or "").strip()
@@ -289,6 +482,12 @@ class StudyEvaluateAPIView(APIView):
                 is_correct=bool(result.get("correto", False)),
                 feedback=result.get("feedback", ""),
                 suggested_de=result.get("resposta_sugerida", ""),
+            )
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "evaluate_timing user_id=%s duration_ms=%.2f",
+                user.id,
+                elapsed_ms,
             )
             return Response(result, status=status.HTTP_200_OK)
         except LearningEngineError as exc:
@@ -326,26 +525,10 @@ class StudyReviewListAPIView(APIView):
                 if not relation:
                     continue
 
-                context_sentence = ""
-                desafio_traducao = ""
+                context_sentence = relation.text_document.raw_text[:280]
+                desafio_traducao = f"Traduza mentalmente uma frase médica com '{knowledge.word_token.lemma}'."
                 nivel_c1 = []
                 variacao_nativa = ""
-
-                try:
-                    study_payload = generate_study_plan(
-                        user=user,
-                        document_id=relation.text_document_id,
-                        focus_word_id=knowledge.word_token_id,
-                    )
-                    item = (study_payload.get("items") or [{}])[0]
-                    llm_result = study_payload.get("llm_result", {})
-                    context_sentence = item.get("context_sentence", "")
-                    desafio_traducao = llm_result.get("desafio_traducao", "")
-                    nivel_c1 = llm_result.get("nivel_c1", []) or []
-                    variacao_nativa = llm_result.get("variacao_nativa", "")
-                except Exception:
-                    context_sentence = relation.text_document.raw_text[:280]
-                    desafio_traducao = f"Traduza mentalmente uma frase médica com '{knowledge.word_token.lemma}'."
 
                 cards.append(
                     {

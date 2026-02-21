@@ -14,7 +14,7 @@ services:
       timeout: 5s
       retries: 5
 
-  web:
+  frases_web:
     build:
       context: .
       dockerfile: Dockerfile
@@ -25,12 +25,20 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-usuario}:${POSTGRES_PASSWORD:-senha}@db:5432/${POSTGRES_DB:-klinikdeutsch_db}
+      DATABASE_URL: postgres://${POSTGRES_USER:-usuario}:${POSTGRES_PASSWORD:-senha}@db:5432/${POSTGRES_DB:-klinikdeutsch_db}?sslmode=disable
       DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
       DJANGO_SECURE_SSL: ${DJANGO_SECURE_SSL:-False}
     ports:
       - "8050:8000"
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120
+    networks:
+      - default
+      - perguntas_proxy
+    command: sh -c "python manage.py collectstatic --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120"
 
 volumes:
   pgdata:
+
+networks:
+  perguntas_proxy:
+    external: true
+    name: perguntas_default

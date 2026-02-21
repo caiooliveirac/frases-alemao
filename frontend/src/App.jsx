@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  analyzePhraseDeep,
+  analyzePhraseLite,
   createDocument,
   getClinicalScenarios,
   getCurrentUser,
@@ -10,6 +12,86 @@ import {
 } from "./api_client";
 import DailyReview from "./components/DailyReview";
 import InteractiveReader from "./components/InteractiveReader";
+
+const ANALYSIS_STATE = {
+  IDLE: "idle",
+  ANALYZING_LITE: "analyzing_lite",
+  LITE_READY: "lite_ready",
+  ANALYZING_DEEP: "analyzing_deep",
+  DEEP_READY: "deep_ready",
+  ERROR: "error",
+};
+
+function hashPhrase(phrase) {
+  let hash = 0;
+  for (let index = 0; index < phrase.length; index += 1) {
+    hash = ((hash << 5) - hash) + phrase.charCodeAt(index);
+    hash |= 0;
+  }
+  return `${phrase.length}:${Math.abs(hash)}`;
+}
+
+function mapLiteTokens(tokens = []) {
+  return tokens.map((token) => ({
+    id: token.token_id,
+    token_id: token.token_id,
+    lemma: token.lemma,
+    pos: token.pos,
+    gender: token.gender || null,
+    word: {
+      id: null,
+      lemma: token.lemma,
+      pos_tag: token.pos,
+      gender: token.gender || "X",
+    },
+  }));
+}
+
+function mergeDeepTokens(baseTokens = [], deepTokens = []) {
+  const byId = new Map(deepTokens.map((token) => [token.token_id, token]));
+  return baseTokens.map((token) => {
+    const deep = byId.get(token.token_id || token.id);
+    if (!deep) return token;
+
+    return {
+      ...token,
+      surface: deep.surface,
+      lemma: deep.lemma,
+      pos: deep.pos,
+      gender: deep.gender,
+      case: deep.case,
+      syntactic_role: deep.syntactic_role,
+      confidence: deep.confidence,
+      grammatical_case: deep.case,
+      word: {
+        ...(token.word || {}),
+        lemma: deep.lemma,
+        pos_tag: deep.pos,
+        gender: deep.gender || token?.word?.gender || "X",
+      },
+    };
+  });
+}
+
+function mergeWordIds(baseTokens = [], detailTokens = []) {
+  const byRelationId = new Map(detailTokens.map((token) => [token.id, token]));
+  return baseTokens.map((token) => {
+    const relation = byRelationId.get(token.token_id || token.id);
+    if (!relation) return token;
+
+    return {
+      ...token,
+      word_token_id: relation?.word?.id || null,
+      word: {
+        ...(token.word || {}),
+        id: relation?.word?.id || null,
+        lemma: relation?.word?.lemma || token?.word?.lemma || token.lemma,
+        pos_tag: relation?.word?.pos_tag || token?.word?.pos_tag || token.pos,
+        gender: relation?.word?.gender || token?.word?.gender || token.gender || "X",
+      },
+    };
+  });
+}
 
 function getRandomScenario(items = [], excludeText = "") {
   if (!items.length) return "";
@@ -34,10 +116,13 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const [analysisState, setAnalysisState] = useState(ANALYSIS_STATE.IDLE);
   const [reviewMode, setReviewMode] = useState(false);
   const [dueCards, setDueCards] = useState([]);
   const [dueLoading, setDueLoading] = useState(false);
   const [dueError, setDueError] = useState("");
+  const activeAnalysisRef = useRef(0);
+  const activePhraseHashRef = useRef("");
 
   const scenarioTexts = useMemo(() => scenarioItems.map((item) => item.text), [scenarioItems]);
 
@@ -164,6 +249,7 @@ export default function App() {
     const next = getRandomScenario(scenarioTexts, text);
     setText(next);
     setResult(null);
+    setAnalysisState(ANALYSIS_STATE.IDLE);
     setError("");
   };
 
@@ -171,6 +257,7 @@ export default function App() {
     const level = event.target.value;
     setError("");
     setResult(null);
+    setAnalysisState(ANALYSIS_STATE.IDLE);
     try {
       await loadScenarios(level);
     } catch (err) {
@@ -181,25 +268,103 @@ export default function App() {
   const handleAnalyze = async () => {
     if (!text.trim() || loading) return;
 
+    const phrase = text.trim();
+    const phraseHash = hashPhrase(phrase);
+    const analysisId = activeAnalysisRef.current + 1;
+    activeAnalysisRef.current = analysisId;
+    activePhraseHashRef.current = phraseHash;
+
     setLoading(true);
     setError("");
+    setAnalysisState(ANALYSIS_STATE.ANALYZING_LITE);
+    setResult(null);
 
     try {
-      const created = await createDocument(text.trim(), "Caso clínico");
+      const created = await createDocument(phrase, "Caso clínico");
       const documentId = created?.document_id;
 
       if (!documentId) {
         throw new Error("document_id não retornado pela API.");
       }
 
-      const detail = await getDocumentById(documentId);
-      setResult(detail);
+      if (analysisId !== activeAnalysisRef.current || phraseHash !== activePhraseHashRef.current) {
+        return;
+      }
+
+      const lite = await analyzePhraseLite(documentId, 20);
+
+      if (analysisId !== activeAnalysisRef.current || phraseHash !== activePhraseHashRef.current) {
+        return;
+      }
+
+      setResult({
+        document_id: documentId,
+        phrase_hash: phraseHash,
+        tokens: mapLiteTokens(lite?.tokens || []),
+      });
+      setAnalysisState(ANALYSIS_STATE.LITE_READY);
+      setLoading(false);
+
+      setAnalysisState(ANALYSIS_STATE.ANALYZING_DEEP);
+      const [deepResult, detailResult] = await Promise.allSettled([
+        analyzePhraseDeep(documentId, 20),
+        getDocumentById(documentId),
+      ]);
+
+      if (analysisId !== activeAnalysisRef.current || phraseHash !== activePhraseHashRef.current) {
+        return;
+      }
+
+      setResult((previous) => {
+        if (!previous || previous?.phrase_hash !== phraseHash) return previous;
+
+        let mergedTokens = previous.tokens || [];
+        if (detailResult.status === "fulfilled") {
+          mergedTokens = mergeWordIds(mergedTokens, detailResult.value?.tokens || []);
+        }
+        if (deepResult.status === "fulfilled") {
+          mergedTokens = mergeDeepTokens(mergedTokens, deepResult.value?.tokens || []);
+        }
+
+        return {
+          ...previous,
+          document: detailResult.status === "fulfilled" ? detailResult.value?.document : previous.document,
+          tokens: mergedTokens,
+        };
+      });
+
+      if (deepResult.status === "fulfilled") {
+        setAnalysisState(ANALYSIS_STATE.DEEP_READY);
+      } else {
+        setAnalysisState(ANALYSIS_STATE.ERROR);
+        const deepError = deepResult.reason?.message || "Falha ao carregar análise detalhada.";
+        setError(deepError);
+      }
     } catch (err) {
       setError(err?.message || "Falha ao analisar caso clínico.");
+      setAnalysisState(ANALYSIS_STATE.ERROR);
       setResult(null);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleTextChange = (event) => {
+    const nextText = event.target.value;
+    const nextHash = hashPhrase(nextText.trim());
+    setText(nextText);
+
+    activePhraseHashRef.current = nextHash;
+    activeAnalysisRef.current += 1;
+
+    setResult((previous) => {
+      if (!previous) return previous;
+      if (previous.phrase_hash === nextHash) return previous;
+      return null;
+    });
+
+    setError("");
+    setAnalysisState(ANALYSIS_STATE.IDLE);
   };
 
   const handleStartDailyReview = async () => {
@@ -292,7 +457,7 @@ export default function App() {
 
             <textarea
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              onChange={handleTextChange}
               rows={9}
               placeholder="Nenhum cenário disponível para este usuário."
               className="mt-6 w-full bg-[#111111] border-2 border-gray-300 text-gray-100 p-4 font-mono text-[15px] leading-7 rounded-none outline-none focus:border-blue-400 shadow-[6px_6px_0_#2a2a2a]"
@@ -328,7 +493,7 @@ export default function App() {
                 <h2 className="text-xl font-extrabold uppercase tracking-[0.14em] text-purple-300">
                   Leitura Interativa
                 </h2>
-                <InteractiveReader data={result} />
+                <InteractiveReader data={result} analysisState={analysisState} />
               </section>
             ) : null}
           </>

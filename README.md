@@ -2,6 +2,21 @@
 
 Plataforma de treino de alemão médico com foco em contexto real de plantão (A1/B1/C1), análise linguística com spaCy e geração/avaliação assistida por LLM (Grok 4.1).
 
+## Documentação técnica de fluxo LLM
+
+Para entendimento rápido do caminho frontend → backend → Grok, pontos síncronos, estimativas de latência/payload e checklist de manutenção, consulte:
+
+- `docs/llm-flow-observability.md`
+
+Inclui também o contrato JSON estrito do endpoint de análise de frase:
+
+- `GET /api/documents/{document_id}/analysis/`
+
+Separação de análise (sem quebrar compatibilidade):
+
+- `POST /api/analyze_lite` (rápido, tokens básicos)
+- `POST /api/analyze_deep` (detalhado, caso/função/confidence)
+
 ## Visão geral
 
 O KlinikDeutsch permite:
@@ -99,8 +114,8 @@ Subida padrão:
 ```bash
 docker compose build
 docker compose up -d
-docker compose exec web python manage.py migrate
-docker compose exec web python manage.py collectstatic --noinput
+docker compose exec frases_web python manage.py migrate
+docker compose exec frases_web python manage.py collectstatic --noinput
 ```
 
 A aplicação web fica exposta na porta `8050` (proxy reverso recomendado no Nginx para `mnrs.com.br`).

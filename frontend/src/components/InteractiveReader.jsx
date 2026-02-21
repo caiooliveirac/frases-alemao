@@ -1,6 +1,13 @@
 import React, { useState } from "react";
 import { evaluateStudyTranslation, generateStudyFlashcard } from "../api_client";
 
+function normalizeCaseForClass(caso) {
+  if (caso === "Nom") return "NOM";
+  if (caso === "Akk") return "AKK";
+  if (caso === "Dat") return "DAT";
+  return caso;
+}
+
 function getCaseClass(caso) {
   if (caso === "NOM") return "bg-blue-900/50 text-blue-200 border-b-2 border-blue-500 font-medium px-1.5 py-0.5 mx-0.5 cursor-pointer hover:bg-blue-800 transition-colors";
   if (caso === "AKK") return "bg-red-900/50 text-red-200 border-b-2 border-red-500 font-medium px-1.5 py-0.5 mx-0.5 cursor-pointer hover:bg-red-800 transition-colors";
@@ -21,7 +28,7 @@ export default function InteractiveReader({ data }) {
   const documentId = data?.document?.id || data?.document_id;
 
   const handleClickToken = async (token) => {
-    const palavraId = token?.palavra?.id || token?.word?.id;
+    const palavraId = token?.palavra?.id || token?.word?.id || token?.word_token_id;
     if (!documentId || !palavraId) return;
 
     setLoading(true);
@@ -85,13 +92,14 @@ export default function InteractiveReader({ data }) {
     <div className="mt-4 space-y-6">
       <div className="leading-9 font-mono text-[15px] tracking-wide">
         {tokens.map((token) => {
-          const lema = token?.palavra?.lema || token?.word?.lemma || "";
-          const posTag = token?.palavra?.pos_tag || token?.word?.pos_tag || "";
-          const caso = token?.caso_gramatical || token?.grammatical_case || "";
+          const lema = token?.palavra?.lema || token?.word?.lemma || token?.lemma || token?.surface || "";
+          const posTag = token?.palavra?.pos_tag || token?.word?.pos_tag || token?.pos || "";
+          const casoRaw = token?.caso_gramatical || token?.grammatical_case || token?.case || "";
+          const caso = normalizeCaseForClass(casoRaw);
 
           return (
             <span
-              key={token.id}
+              key={token.id || token.token_id}
               title={`lemma: ${lema} | pos_tag: ${posTag}`}
               className={getCaseClass(caso)}
               onClick={() => handleClickToken(token)}

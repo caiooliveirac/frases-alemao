@@ -4,6 +4,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 
 from alemao_app.models import CEFRLevel, ClinicalScenario
+from .c1_scenarios import C1_SCENARIOS
 
 
 A1_SCENARIOS = [
@@ -165,7 +166,7 @@ B1_SCENARIOS = [
 
 
 class Command(BaseCommand):
-    help = "Importa cenários clínicos do frontend/src/App.jsx para a tabela clinical_scenarios"
+    help = "Popula cenários clínicos A1/B1/C1 na tabela clinical_scenarios"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -188,10 +189,13 @@ class Command(BaseCommand):
             entries = re.findall(r'"((?:[^"\\]|\\.)*)"\s*,?', array_block)
             c1_scenarios = [entry.replace(r"\n", "\n").strip() for entry in entries if entry.strip()]
 
-        if not c1_scenarios:
+        if not c1_scenarios and not options.get("reset"):
             c1_scenarios = list(
                 ClinicalScenario.objects.filter(proficiency_level=CEFRLevel.C1).values_list("text", flat=True)
             )
+
+        if not c1_scenarios:
+            c1_scenarios = C1_SCENARIOS
 
         if not c1_scenarios:
             raise CommandError("Nenhum cenário C1 encontrado para importar.")
